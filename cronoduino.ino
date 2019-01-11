@@ -43,6 +43,15 @@
 #include <avr/pgmspace.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Timezone.h>         //https://github.com/JChristensen/Timezone
+
+// Central Europe Time Zone (Rome)
+TimeChangeRule myCEST = {"CEST", Last, Sun, Mar, 2, +120};    //Daylight time = UTC +2 hours
+TimeChangeRule myCET = {"CET", Last, Sun, Oct, 3, +60};       //Standard time = UTC +1 hours
+Timezone myTZ(myCEST, myCET);
+TimeChangeRule *tcr;        //pointer to the time change rule, use to get TZ abbrev
+
+ 
 
 // If using software SPI (the default case):
 #define OLED_D1   8  //MOSI
@@ -52,11 +61,9 @@
 #define OLED_RESET 7
 Adafruit_SSD1306 display(OLED_D1, OLED_D0, OLED_DC, OLED_RESET, OLED_CS);
 
-//#define NUMFLAKES 10
-//#define XPOS 0
-//#define YPOS 1
+
 #define DELTAY 2
-#define BOUNCE_DURATION 100   // define an appropriate bounce time in ms for switches
+#define BOUNCE_DURATION 200   // define an appropriate bounce time in ms for switches
 
 volatile unsigned long bounceTime1 = 0; // variable to hold ms count to debounce a pressed switch
 volatile unsigned long bounceTime2 = 0; // variable to hold ms count to debounce a pressed switch
@@ -64,23 +71,7 @@ volatile unsigned long bounceTime2 = 0; // variable to hold ms count to debounce
 
 #define LOGO16_GLCD_HEIGHT 16
 #define LOGO16_GLCD_WIDTH  16
-/*static const unsigned char PROGMEM logo16_glcd_bmp[] =
-  { B00000000, B11000000,
-  B00000001, B11000000,
-  B00000001, B11000000,
-  B00000011, B11100000,
-  B11110011, B11100000,
-  B11111110, B11111000,
-  B01111110, B11111111,
-  B00110011, B10011111,
-  B00011111, B11111100,
-  B00001101, B01110000,
-  B00011011, B10100000,
-  B00111111, B11100000,
-  B00111111, B11110000,
-  B01111100, B11110000,
-  B01110000, B01110000,
-  B00000000, B00110000 };*/
+
 
 #if (SSD1306_LCDHEIGHT != 64)
 //#error("Height incorrect, please fix Adafruit_SSD1306.h!");
@@ -129,13 +120,65 @@ float RTCTemp;
 float DHT11Temp;
 float DHT11Hum;
 
-static time_t LastChanged;
-//time_t ScrollStarted;
-time_t t;
 
+volatile time_t t;
+volatile time_t tLast;
+volatile time_t tLast2;
+volatile time_t LastChanged=0;
+volatile time_t tLast3;
+volatile time_t tLast4;
+volatile time_t tLast5;
+
+volatile int displaytype = 3;
 
 boolean running = false; // heating system runnung flag
 boolean fx = false; // ":" character toggling each second flag
+
+void parseserial()
+{
+    //note that the tmElements_t Year member is an offset from 1970,
+    //but the RTC wants the last two digits of the calendar year.
+    //use the convenience macros from Time.h to do the conversions.
+    tmElements_t tm;
+    int y = Serial.parseInt();
+    if (y >= 100 && y < 1000)
+      Serial << F("Error: Year must be two digits or four digits!") << endl;
+    else {
+      if (y >= 1000)
+        tm.Year = CalendarYrToTm(y);
+      else    //(y < 100)
+        tm.Year = y2kYearToTm(y);
+      tm.Month = Serial.parseInt();
+      tm.Day = Serial.parseInt();
+      tm.Hour = Serial.parseInt();
+      tm.Minute = Serial.parseInt();
+      tm.Second = Serial.parseInt();
+      if ( (tm.Month >= 1 && tm.Month <= 12) &&
+           (tm.Day >= 1  && tm.Day <= 31) &&
+           (tm.Hour >= 0 && tm.Hour <= 24) &&
+           (tm.Minute >= 0 && tm.Minute <= 59) &&
+           (tm.Second >= 0 && tm.Second <= 59)) {
+        time_t t_local = makeTime(tm);
+        t=myTZ.toUTC(t_local);
+        RTC.set(t);        //use the time_t value to ensure correct weekday is set
+        setTime(t);
+        Serial << F("RTC set to: ");
+        printDateTime(t);
+        Serial << endl;
+      }
+      else {
+        Serial << F("Invalid Date/Time: ");
+        Serial << y << F(" ");
+        Serial << tm.Month << F(" ");
+        Serial << tm.Day << F(" ");
+        Serial << tm.Hour << F(" ");
+        Serial << tm.Minute << F(" ");
+        Serial << tm.Second << endl;
+      }
+      //dump any extraneous input
+      while (Serial.available() > 0) Serial.read();
+    }
+  }
 
 void setup(void)
 {
@@ -147,8 +190,8 @@ void setup(void)
   display.clearDisplay();
   display.setTextColor(WHITE);
   // init done
-  attachInterrupt(2, dectemp, FALLING);
-  attachInterrupt(3, inctemp, FALLING);
+  attachInterrupt(0, dectemp, FALLING);
+  attachInterrupt(1, inctemp, FALLING);
 
   pinMode(RELEOFFPIN, OUTPUT); // relay coil 1: switch off
   pinMode(RELEONPIN, OUTPUT); // relay coil 2: switch on
@@ -179,101 +222,72 @@ void setup(void)
     }
     Serial << endl;
   }
+  time_t utc_t;
+  utc_t = now();
+  t = myTZ.toLocal(utc_t, &tcr);
+  tLast3 = t;
+  tLast2 = 0;
+  tLast4 = t;
+  tLast5 = t;
+  tLast = t;
 }
 
 void loop(void)
 {
-  static time_t tLast;
-  tmElements_t tm;
 
   //check for input to set the RTC, minimum length is 12, i.e. yy,m,d,h,m,s
-  if (Serial.available() >= 12) {
-    //note that the tmElements_t Year member is an offset from 1970,
-    //but the RTC wants the last two digits of the calendar year.
-    //use the convenience macros from Time.h to do the conversions.
-    int y = Serial.parseInt();
-    if (y >= 100 && y < 1000)
-      Serial << F("Error: Year must be two digits or four digits!") << endl;
-    else {
-      if (y >= 1000)
-        tm.Year = CalendarYrToTm(y);
-      else    //(y < 100)
-        tm.Year = y2kYearToTm(y);
-      tm.Month = Serial.parseInt();
-      tm.Day = Serial.parseInt();
-      tm.Hour = Serial.parseInt();
-      tm.Minute = Serial.parseInt();
-      tm.Second = Serial.parseInt();
-      if ( (tm.Month >= 1 && tm.Month <= 12) &&
-           (tm.Day >= 1  && tm.Day <= 31) &&
-           (tm.Hour >= 0 && tm.Hour <= 24) &&
-           (tm.Minute >= 0 && tm.Minute <= 59) &&
-           (tm.Second >= 0 && tm.Second <= 59)) {
-        t = makeTime(tm);
-        RTC.set(t);        //use the time_t value to ensure correct weekday is set
-        setTime(t);
-        Serial << F("RTC set to: ");
-        printDateTime(t);
-        Serial << endl;
-      }
-      else {
-        Serial << F("Invalid Date/Time: ");
-        Serial << y << F(" ");
-        Serial << tm.Month << F(" ");
-        Serial << tm.Day << F(" ");
-        Serial << tm.Hour << F(" ");
-        Serial << tm.Minute << F(" ");
-        Serial << tm.Second << endl;
-      }
-      //dump any extraneous input
-      while (Serial.available() > 0) Serial.read();
-    }
+  if (Serial.available() >= 12){
+    parseserial();
   }
 
-  t = now();
-  if (t != tLast) {
-    printDateTime(t); //print date and time on the serial
-    //if (second(t) == 0) {
-    RTCTemp = RTC.temperature() / 4.;
-    //float f = c * 9. / 5. + 32.;
-    Serial << F("  ") << RTCTemp << F(" C  ") ;//<< f << F(" F");
-    int chk = DHT11.read11(DHT11PIN);
-    switch (chk)
-    {
-      case DHTLIB_OK:
-        //Serial.println("OK");
-        break;
-      case DHTLIB_ERROR_CHECKSUM:
-        Serial << endl << F("Checksum error");
-        break;
-      case DHTLIB_ERROR_TIMEOUT:
-        Serial << endl << F("Time out error");
-        break;
-      default:
-        Serial << endl << F("Unknown error");
-        break;
-    }
-    DHT11Temp = DHT11.temperature + TEMP_OFFSET;
-    DHT11Hum = DHT11.humidity + HUM_OFFSET;
-    Serial << F("DHT11: Humidity (%): ");
-    Serial << DHT11Hum;
-
-    Serial << F(" Temperature (C): ");
-    Serial << DHT11Temp;
-    Serial << F(" Last Changed: ");
-    printTime(LastChanged);
-    Serial << F(" Lasted seconds: ") << (t - LastChanged);
-
-    if ((hour(t) != hour(tLast)) && ((t - LastChanged) >= 3600)) {
+  time_t utc_t;
+  utc_t = now();
+  t = myTZ.toLocal(utc_t, &tcr);
+    //get the setup temp every hour and after an hour is has manually changed
+    if ((t-tLast >= 3600) && (t-LastChanged >= 3600)) { 
       setuptemp = (word)(pgm_read_dword(&(weektemp[weekday(t) - 1][hour(t)]))) / (word)10;
       setuptemp = constrain(setuptemp, MINTEMP, MAXTEMP);
       Serial << F(" Temp set ") << setuptemp;
+      tLast=t;
     }
-    showdisplay();
-    //}
 
+    if(t != tLast3){ // show display every second
+        showdisplay();
+        tLast3 = t;
+    }
 
-    if (minute(t) != minute(tLast)) { //  check the temperature every minute
+    if ((t - tLast2) >= 60){ //  check the temperature every minute
+      Serial << endl;
+      printDateTime(t); //print date and time on the serial
+      //if (second(t) == 0) {
+      RTCTemp = RTC.temperature() / 4.;
+      //float f = c * 9. / 5. + 32.;
+      Serial << F("  ") << RTCTemp << F(" C  ") ;//<< f << F(" F");
+      int chk = DHT11.read11(DHT11PIN);
+      switch (chk)
+      {
+        case DHTLIB_OK:
+          //Serial.println("OK");
+          break;
+        case DHTLIB_ERROR_CHECKSUM:
+          Serial << endl << F("Checksum error");
+          break;
+        case DHTLIB_ERROR_TIMEOUT:
+          Serial << endl << F("Time out error");
+          break;
+        default:
+          Serial << endl << F("Unknown error");
+          break;
+      }
+      DHT11Temp = DHT11.temperature + TEMP_OFFSET;
+      DHT11Hum = DHT11.humidity + HUM_OFFSET;
+      Serial << F("DHT11: Humidity (%): ");
+      Serial << DHT11Hum;
+      Serial << F(" Temperature (C): ");
+      Serial << DHT11Temp;
+      Serial << F(" Last Changed: ");
+      printTime(LastChanged);
+      Serial << F(" Lasted seconds: ") << (t - LastChanged);    
       Serial << F(" Day: ") << weekday(t) << F(" Hour: ") << hour(t) << F(" Set up Temperature ") << setuptemp;
       if ((setuptemp > DHT11Temp) && !running) {
         //switch on heating system
@@ -291,10 +305,14 @@ void loop(void)
           running = false;
         }
       }
+      tLast2 = t;
     }
-    Serial << endl;
-    tLast = t;
-  }
+    if ((t-tLast4)>=60){
+      displaytype=1;
+    }
+    if((displaytype ==2) && ((t-tLast4)>=5)){
+      displaytype=3;
+    }
 }
 
 void displayError(int E)
@@ -308,41 +326,12 @@ void displayError(int E)
   delay(ERRORDISPLAYDELAY);
 }
 
-//print date and time to OLED
-void displayDateTime(time_t t)
-{
-  displayDate(t);
-  display.print(F(" "));
-  displayTime(t);
-}
 
-//print time to OLED
-void displayTime(time_t t)
-{
-  displayI00(hour(t), ':');
-  displayI00(minute(t), ':');
-  displayI00(second(t), ' ');
-}
 
-//print time without seconds to OLED
-void displayTime2(time_t t)
-{
-  displayI00(hour(t), ':');
-  displayI00(minute(t), ' ');
-}
 
-//display date to OLED
-void displayDate(time_t t)
-{
-  displayI00(day(t), 0);
-  display.print(F(" "));
-  display.print(monthShortStr(month(t)));
-  display.print(F(" "));
-  display.print(year(t));
-}
 
 //display an integer in "00" format (with leading zero),
-//followed by a delimiter character to Serial.
+//followed by a delimiter character to OLED.
 //Input value assumed to be between 0 and 99.
 void displayI00(int val, char delim)
 {
@@ -391,97 +380,59 @@ void printI00(int val, char delim)
 
 void inctemp()
 {
-  Serial << endl << F("inctemp") << endl ;
-  if (abs(millis() - bounceTime2) > BOUNCE_DURATION)
+  //Serial << endl << F("inctemp") << endl ;
+  if (abs(millis() - bounceTime1) > BOUNCE_DURATION)
   {
-    if ((t - LastChanged) < 60)
-    {
+    switch (displaytype) {
+    case 1:
+      displaytype = 3;
+      showdisplay3();
+    break;
+    case 2:
       setuptemp = constrain(setuptemp + 1, MINTEMP, MAXTEMP);
-      //delayMicroseconds(500000);
-      showdisplay2(); //Show setup temp
-      LastChanged = now();
+      LastChanged = t;
+      showdisplay2(); 
+    break;
+    case 3:
+     displaytype = 2;
+     showdisplay2();
+    break;
     }
-    else
-    {
-      showdisplay3(); //Show time and current temp
-      LastChanged = now() - 6;
-    }
-    bounceTime2 = millis();
+    tLast4=t;
+    bounceTime1 = millis();
   }
 }
 
 void dectemp()
 {
-  Serial << endl << F("dectemp") << endl ;
+  //Serial << endl << F("dectemp") << endl ;
   if (abs(millis() - bounceTime2) > BOUNCE_DURATION)
   {
-    if ((t - LastChanged) < 60)
-    {
+    switch (displaytype) {
+    case 1:
+      displaytype = 3;
+      showdisplay3();
+    break;
+    case 2:
       setuptemp = constrain(setuptemp - 1, MINTEMP, MAXTEMP);
-      //delayMicroseconds(500000);
-      showdisplay2(); //Show setup temp
-      LastChanged = now();
+      LastChanged = t;
+      showdisplay2(); 
+    break;
+    case 3:
+     displaytype = 2;
+     showdisplay2();
+    break;
     }
-    else
-    {
-      showdisplay3(); //Show time and current temp
-      LastChanged = now() - 6;
-    }
+    tLast4=t;
     bounceTime2 = millis();
   }
 }
 
-
-
-void showdisplay()
-{
-  if (((t - LastChanged) >= 5) &&  ((t - LastChanged) < 60))
-  {
-    showdisplay3(); //Show time and current temp
-  }
-  else if ((t - LastChanged) >= 60)
-  {
+void showdisplay1(){
     display.clearDisplay();
-    display.display();
-  }
-  else
-  {
-    showdisplay2(); //Show setup temp
-  }
+    display.display();  
 }
 
-void showdisplay1()
-{
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  displayDateTime(t); //display date and time on the display
-  //display.display();
-  display.setTextSize(1);
-  display.setCursor(0, 10);
-  display.print(F("T: "));
-  display.print(DHT11Temp);
-  display.print(F(" C "));
-  //display.setCursor(0,20);
-  //display.print("Temp2: ");
-  display.print(RTCTemp);
-  display.print(F(" C"));
-  display.setCursor(0, 20);
-  display.print(F("Setup: "));
-  display.print(setuptemp);
-  display.print(F(" C"));
-  if (running) {
-    display.print(F("       ON"));
-  } else
-  {
-    display.print(F("      OFF"));
-  }
-  display.setCursor(0, 30);
-  display.print(F("Hum: "));
-  display.print(DHT11Hum);
-  display.print(F(" %"));
-  display.display();
-}
 
 void showdisplay3()
 { //static boolean f;
@@ -512,7 +463,6 @@ void showdisplay3()
   display.print(int(DHT11Hum));
   display.print(F("%"));
   display.display();
-  //display.startscrollleft(0x00, 0x0F);
 }
 
 void showdisplay2()
@@ -525,21 +475,18 @@ void showdisplay2()
   display.display();
 }
 
-/*
-  void testdrawchar(void) {
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
+void showdisplay()
+{
 
-  for (uint8_t i=0; i < 168; i++) {
-    if (i == '\n') continue;
-    display.write(i);
-    if ((i > 0) && (i % 21 == 0))
-      display.println();
+    switch (displaytype) {
+    case 1:
+      showdisplay1();
+    break;
+    case 2:
+      showdisplay2();
+    break;
+    case 3:
+      showdisplay3();
+    break;
   }
-  display.display();
-  }
-*/
-
-
-
+}
