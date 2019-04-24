@@ -399,8 +399,8 @@ void inctemp()
     break;
     }
     tLast4=t;
-    bounceTime1 = millis();
   }
+  bounceTime1 = millis();
 }
 
 void dectemp()
@@ -424,8 +424,8 @@ void dectemp()
     break;
     }
     tLast4=t;
-    bounceTime2 = millis();
   }
+  bounceTime2 = millis();
 }
 
 void showdisplay1(){
